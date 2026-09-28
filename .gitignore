@@ -1,0 +1,10 @@
+target/
+*.class
+.vscode/
+.idea/
+*.iml
+db.properties.local
+
+src/main/resources/db.properties
+
+tempCodeRunnerFile.java
