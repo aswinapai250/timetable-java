@@ -7,6 +7,10 @@ import com.asiet.aids.timetable.model.ClassGroup;
 import com.asiet.aids.timetable.model.TimetableEntry;
 import com.asiet.aids.timetable.service.TimetableGenerationService;
 
+import com.asiet.aids.timetable.dao.TeacherDAO;
+import com.asiet.aids.timetable.model.Slot;
+import com.asiet.aids.timetable.model.Teacher;
+
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
@@ -26,6 +30,11 @@ public class AdminTimetableViewer extends JFrame {
 
     private JTable legendTable;
     private DefaultTableModel legendModel;
+    private final TeacherDAO teacherDAO = new TeacherDAO();
+    private JComboBox<String> modePicker;
+    private JComboBox<Teacher> teacherPicker;
+    private JButton regenerateButton;
+    private JButton addClassButton;
 
     private static final String[] COLUMNS = {
             "Period", "MON", "TUE", "WED", "THU", "FRI"
@@ -49,24 +58,41 @@ public class AdminTimetableViewer extends JFrame {
     private void buildUI() {
         JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
 
-        classPicker = new JComboBox<>();
-        classPicker.addActionListener(e -> loadTimetableForSelectedClass());
+modePicker = new JComboBox<>(new String[]{"Class", "Teacher"});
+modePicker.addActionListener(e -> onModeChanged());
 
-        JButton regenerateButton = new JButton("Regenerate");
-        regenerateButton.addActionListener(e -> onRegenerateClicked());
+classPicker = new JComboBox<>();
+classPicker.addActionListener(e -> loadCurrentView());
 
-        JButton refreshButton = new JButton("Refresh");
-        refreshButton.addActionListener(e -> loadTimetableForSelectedClass());
+teacherPicker = new JComboBox<>();
+teacherPicker.setVisible(false);
+teacherPicker.setRenderer(new DefaultListCellRenderer() {
+    @Override
+    public Component getListCellRendererComponent(JList<?> list, Object value,
+            int index, boolean isSelected, boolean cellHasFocus) {
+        super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+        if (value instanceof Teacher) setText(((Teacher) value).getName());
+        return this;
+    }
+});
+teacherPicker.addActionListener(e -> loadCurrentView());
 
-        JButton addClassButton = new JButton("Add Class");
-        addClassButton.addActionListener(e -> onAddClassClicked());
+regenerateButton = new JButton("Regenerate");
+regenerateButton.addActionListener(e -> onRegenerateClicked());
 
-        topPanel.add(new JLabel("Class:"));
-        topPanel.add(classPicker);
-        topPanel.add(regenerateButton);
-        topPanel.add(refreshButton);
-        topPanel.add(addClassButton);
+JButton refreshButton = new JButton("Refresh");
+refreshButton.addActionListener(e -> loadCurrentView());
 
+addClassButton = new JButton("Add Class");
+addClassButton.addActionListener(e -> onAddClassClicked());
+
+topPanel.add(new JLabel("View:"));
+topPanel.add(modePicker);
+topPanel.add(classPicker);
+topPanel.add(teacherPicker);
+topPanel.add(regenerateButton);
+topPanel.add(refreshButton);
+topPanel.add(addClassButton);
         tableModel = new DefaultTableModel(COLUMNS, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
@@ -111,9 +137,10 @@ for (int i = 1; i <= 5; i++) {
     }
 
     private void loadTimetableForSelectedClass() {
-        ClassGroup selected = (ClassGroup) classPicker.getSelectedItem();
-        if (selected == null) return;
-
+    if (!"Class".equals(modePicker.getSelectedItem())) return;
+    legendModel.setColumnIdentifiers(LEGEND_COLUMNS);
+    ClassGroup selected = (ClassGroup) classPicker.getSelectedItem();
+    if (selected == null) return;
         try {
             List<TimetableEntry> entries = entryDAO.findByClassId(selected.getClassId());
 
@@ -207,7 +234,88 @@ for (int i = 1; i <= 5; i++) {
             loadClasses();
         }
     }
+    private void loadCurrentView() {
+        if ("Teacher".equals(modePicker.getSelectedItem())) loadTimetableForSelectedTeacher();
+        else loadTimetableForSelectedClass();
+    }
 
+    private void onModeChanged() {
+        boolean teacherMode = "Teacher".equals(modePicker.getSelectedItem());
+        classPicker.setVisible(!teacherMode);
+        teacherPicker.setVisible(teacherMode);
+        regenerateButton.setEnabled(!teacherMode);
+        addClassButton.setEnabled(!teacherMode);
+        if (teacherMode && teacherPicker.getItemCount() == 0) {
+            loadTeachers();
+        } else {
+            loadCurrentView();
+        }
+        revalidate();
+        repaint();
+    }
+
+    private void loadTeachers() {
+        try {
+            teacherPicker.removeAllItems();
+            for (Teacher t : teacherDAO.findAll()) teacherPicker.addItem(t);
+        } catch (SQLException ex) {
+            showError("Failed to load teachers: " + ex.getMessage());
+        }
+    }
+
+    private void loadTimetableForSelectedTeacher() {
+        Teacher selected = (Teacher) teacherPicker.getSelectedItem();
+        if (selected == null) return;
+
+        try {
+            List<TimetableEntry> entries = entryDAO.findByTeacherId(selected.getTeacherId());
+            java.util.Map<String, List<TimetableEntry>> lookup = new java.util.HashMap<>();
+            java.util.Map<String, Object[]> legendRows = new java.util.LinkedHashMap<>();
+
+            for (TimetableEntry e : entries) {
+                String key = e.getSlot().getDay() + "-" + e.getSlot().getPeriod();
+                lookup.computeIfAbsent(key, k -> new ArrayList<>()).add(e);
+
+                String legendKey = e.getSubject().getSubjectId() + "-" + e.getClassGroup().getClassId();
+                legendRows.putIfAbsent(legendKey, new Object[]{
+                        e.getSubject().getSubjectCode(),
+                        e.getSubject().getSubjectName(),
+                        e.getClassGroup().getClassName(),
+                        e.getRoom().getRoomName()
+                });
+            }
+
+            tableModel.setRowCount(0);
+            Slot.Day[] days = Slot.Day.values();
+            for (int period = 1; period <= 7; period++) {
+                Object[] row = new Object[6];
+                row[0] = period;
+                for (int col = 0; col < days.length; col++) {
+                    row[col + 1] = describeForTeacher(lookup.get(days[col] + "-" + period));
+                }
+                tableModel.addRow(row);
+            }
+
+            legendModel.setRowCount(0);
+            legendModel.setColumnIdentifiers(new Object[]{"Code", "Subject Name", "Class", "Room"});
+            for (Object[] r : legendRows.values()) legendModel.addRow(r);
+        } catch (SQLException ex) {
+            showError("Failed to load teacher timetable: " + ex.getMessage());
+        }
+    }
+
+    private String describeForTeacher(List<TimetableEntry> list) {
+        if (list == null || list.isEmpty()) return "Free";
+        StringBuilder sb = new StringBuilder();
+        for (TimetableEntry e : list) {
+            if (sb.length() > 0) sb.append(" | ");
+            sb.append(e.getSubject().getSubjectCode()).append(" - ")
+              .append(e.getClassGroup().getClassName());
+            if (e.getBatch() != null) sb.append(" (").append(e.getBatch()).append(")");
+            sb.append(" @ ").append(e.getRoom().getRoomName());
+        }
+        return sb.toString();
+    }
     private void showError(String message) {
         JOptionPane.showMessageDialog(this, message, "Error", JOptionPane.ERROR_MESSAGE);
     }
